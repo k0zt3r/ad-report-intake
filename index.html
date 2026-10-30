@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AD Report Intake</title>
+  <style>
+    :root{font-family:Segoe UI,Arial,sans-serif;color:#15263d;background:#f4f7fb}*{box-sizing:border-box}body{margin:0}
+    header{background:#142a48;color:#fff;padding:30px max(18px,calc((100vw - 1100px)/2))}header h1{margin:0 0 8px;font-size:30px}header p{margin:0;color:#cbd9ea;line-height:1.5}
+    main{max-width:1100px;margin:22px auto;padding:0 18px 40px}.panel{background:#fff;border:1px solid #d9e3ef;border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 3px 16px #15263d0a}
+    h2{margin:0 0 14px;font-size:20px}h3{font-size:16px;margin:0 0 7px}.muted{color:#65768e}.small{font-size:13px;line-height:1.45}.actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}button{border:0;border-radius:8px;background:#1764b7;color:#fff;padding:10px 15px;font:inherit;font-weight:600;cursor:pointer}button.secondary{background:#e9eff7;color:#17416d}button:disabled{opacity:.5;cursor:not-allowed}input[type=file]{max-width:100%}select{font:inherit;padding:8px;border-radius:7px;border:1px solid #b7c8dc;background:white;width:100%}
+    .row{display:grid;grid-template-columns:minmax(200px,1fr) 215px;gap:15px;align-items:start;border-top:1px solid #e8eef5;padding:13px 0}.row:first-child{border-top:0}.evidence{font-size:13px;color:#536780;margin-top:6px;line-height:1.4}.evidence div{margin:4px 0}.warn{color:#a05200}.error{color:#b22f41}.meta{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:#61728c;margin:10px 0}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}.card{border:1px solid #dce5f0;border-radius:10px;padding:14px}.value{font-size:25px;font-weight:700;margin:4px 0}.zero{color:#b72d3f}.half{color:#a76600}.one{color:#198361}.range{color:#536780}.scenario{border-top:1px solid #e8eef5;padding:12px 0}.scenario:first-child{border-top:0}.tag{display:inline-block;background:#edf3f9;padding:3px 7px;border-radius:5px;margin:3px 4px 0 0;font-size:12px}.empty{padding:18px;border:1px dashed #bac9db;border-radius:9px;color:#62738a}.status{min-height:22px}code{background:#eef3fa;padding:2px 4px;border-radius:4px}@media(max-width:650px){.row{grid-template-columns:1fr}header{padding:25px 18px}}
+  </style>
+</head>
+<body>
+<header><h1>AD Report Intake</h1><p>Отчёт об ИС → проверенные признаки Active Directory → вектор и JSON для будущего агента.</p></header>
+<main>
+  <section class="panel"><h2>1. Загрузить отчёт</h2><div class="actions"><input id="file" type="file" accept=".txt,.md,.docx,.pdf"><button id="analyze">Проанализировать</button><button id="export" class="secondary" disabled>Скачать JSON</button></div><p class="small muted">Поддерживаются TXT, MD, DOCX и PDF с текстовым слоем; до 10 МБ. Файл обрабатывается на этом компьютере. Сканированные PDF пока не распознаются.</p><div id="status" class="status small"></div><div id="meta" class="meta"></div></section>
+  <section class="panel"><h2>2. Контекст ИС</h2><div id="context" class="empty">Загрузите отчёт, чтобы увидеть найденные сведения.</div></section>
+  <section class="panel"><h2>3. Проверить извлечённые признаки</h2><p class="small muted">Автоматические выводы требуют проверки. Изменения здесь пересчитывают оценку; в JSON они отмечены как ручные.</p><div id="features" class="empty">Загрузите отчёт, чтобы увидеть признаки.</div></section>
+  <section class="panel"><h2>4. Вектор и сценарии</h2><div id="vector" class="cards"></div><div id="scenarios"></div><p class="small muted">Оценка от 0 до 1 отражает состояние мер защиты. В каждом направлении и сценарии берётся минимальная оценка применимых признаков. При неизвестных признаках показывается интервал.</p></section>
+  <section class="panel small muted"><strong>Границы прототипа.</strong> Правила извлекают только явно сформулированные сведения. Отсутствие записи в отчёте означает «неизвестно». Это экспертная оценка для планирования проверки, а не вероятность компрометации. Источник и исходный текст доказательства остаются в экспорте.</section>
+</main>
+<script>
+let current=null;
+const $=id=>document.getElementById(id);
+const options=[['unknown','? — неизвестно'],['known:0','0 — отсутствует / слабое'],['known:0.5','0,5 — частично'],['known:1','1 — подтверждено'],['not_applicable','Не применяется']];
+function elem(tag,text,className){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(className)e.className=className;return e}
+function setStatus(message,isError=false){$('status').textContent=message;$('status').className='status small '+(isError?'error':'muted')}
+function scoreText(a){return a.status==='not_applicable'?'—':a.lower===a.upper?String(a.lower).replace('.',','):`${a.lower}–${String(a.upper).replace('.',',')}`}
+function scoreClass(a){return a.status==='not_applicable'?'range':a.upper===0?'zero':a.lower===a.upper&&a.upper===1?'one':a.lower===a.upper?'half':'range'}
+function featureName(id){return current.features[id]?.title||id}
+function renderContext(){
+  const root=$('context');root.replaceChildren();root.className='';
+  const labels={workstations:'АРМ',remote_hosts:'Удалённые хосты'};
+  for(const [key,label] of Object.entries(labels)){
+    const entries=current.context.inventory[key];const line=elem('div',undefined,'scenario');
+    line.append(elem('h3',label));
+    if(entries.length)for(const entry of entries)line.append(elem('div',`${entry.count} — ${entry.locator}: «${entry.excerpt}»`,'small muted'));
+    else line.append(elem('div','Не найдены в отчёте.','small muted'));
+    root.append(line);
+  }
+  root.append(elem('p','Границы разрешённого тестирования задаются отдельно и не выводятся из списка узлов.','small muted'));
+}
+function renderFeatures(){
+  const root=$('features');root.replaceChildren();root.className='';
+  for(const [id,meta] of Object.entries(current.features)){
+    const item=current.observations[id];const row=elem('div',undefined,'row');const left=elem('div');
+    left.append(elem('h3',meta.title),elem('div',meta.group,'small muted'));
+    if(item.status==='conflict')left.append(elem('div','В отчёте найдены противоречивые сведения — требуется проверка.','small warn'));
+    if(item.evidence.length){
+      const ev=elem('div',undefined,'evidence');
+      for(const hit of item.evidence){ev.append(elem('div',`${hit.locator}: «${hit.excerpt}»`))}
+      left.append(ev);
+    }else left.append(elem('div','В отчёте явного подтверждения не найдено.','evidence'));
+    const select=elem('select');select.setAttribute('aria-label',meta.title);
+    for(const [value,label] of options){const o=elem('option',label);o.value=value;select.append(o)}
+    select.value=item.status==='known'?`known:${item.value}`:item.status==='not_applicable'?'not_applicable':'unknown';
+    select.addEventListener('change',async()=>{
+      const [status,raw]=select.value.split(':');
+      item.status=status;item.value=status==='known'?Number(raw):null;item.method='manual';
+      try{await recalculate()}catch(err){setStatus(err.message,true)}
+    });
+    row.append(left,select);root.append(row);
+  }
+}
+function renderEvaluation(){
+  const vector=$('vector');vector.replaceChildren();
+  for(const [name,a] of Object.entries(current.evaluation.vector)){
+    const card=elem('div',undefined,'card');card.append(elem('h3',name),elem('div',scoreText(a),'value '+scoreClass(a)));
+    card.append(elem('div',a.unknown.length?`Уточнить: ${a.unknown.length}`:'Все применимые признаки заполнены','small muted'));vector.append(card);
+  }
+  const root=$('scenarios');root.replaceChildren();root.append(elem('h2','Сценарии'));
+  for(const [name,a] of Object.entries(current.evaluation.scenarios)){
+    const box=elem('div',undefined,'scenario');box.append(elem('h3',`${name}: ${scoreText(a)}`));
+    if(a.limiting.length){const p=elem('div','Ограничивают: ','small');for(const id of a.limiting)p.append(elem('span',featureName(id),'tag'));box.append(p)}
+    if(a.unknown.length)box.append(elem('div',`Уточнить: ${a.unknown.map(featureName).join(', ')}`,'small muted'));
+    root.append(box);
+  }
+}
+async function recalculate(){
+  const response=await fetch('/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({observations:current.observations})});
+  const result=await response.json();if(!response.ok)throw Error(result.error||'Ошибка расчёта');
+  current.evaluation=result;renderEvaluation();setStatus('Оценка пересчитана.');
+}
+$('analyze').addEventListener('click',async()=>{
+  const file=$('file').files[0];if(!file){setStatus('Выберите файл отчёта.',true);return}
+  if(file.size>10*1024*1024){setStatus('Файл больше 10 МБ.',true);return}
+  setStatus('Извлекаю признаки…');$('analyze').disabled=true;
+  try{
+    const response=await fetch('/analyze',{method:'POST',headers:{'X-Filename':encodeURIComponent(file.name),'Content-Type':'application/octet-stream'},body:file});
+    const result=await response.json();if(!response.ok)throw Error(result.error||'Ошибка обработки');
+    current=result;renderContext();renderFeatures();renderEvaluation();$('export').disabled=false;
+    $('meta').replaceChildren(elem('span',result.source.name),elem('span',`${result.source.units} фрагментов`),elem('span',`SHA-256: ${result.source.sha256.slice(0,12)}…`));
+    setStatus('Готово. Проверьте признаки перед экспортом.');
+  }catch(err){setStatus(err.message,true)}finally{$('analyze').disabled=false}
+});
+$('export').addEventListener('click',()=>{
+  if(!current)return;
+  const blob=new Blob([JSON.stringify(current,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);
+  const a=elem('a');a.href=url;a.download=(current.source.name.replace(/\.[^.]+$/,'')||'report')+'.ad-context.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+</script>
+</body>
+</html>

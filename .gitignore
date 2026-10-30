@@ -1,0 +1,8 @@
+__pycache__/
+.venv/
+*.pyc
+*.ad-context.json
+reports/
+.env
+.pytest_cache/
+*.log
